@@ -1,0 +1,36 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# database (SQLite single-file DB — see README for backup)
+/prisma/dev.db
+/prisma/dev.db-journal
+*.db
+*.db-journal
+
+# uploaded media + documents (see README for backup)
+/uploads/*
+!/uploads/.gitkeep
+
+# env
+.env
+.env*.local
+
+# misc
+.DS_Store
+*.pem
+/coverage
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vercel
+*.tsbuildinfo

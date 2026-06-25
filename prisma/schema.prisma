@@ -1,0 +1,342 @@
+// ReFx Business Manager — Prisma schema
+//
+// Design notes:
+//  * All monetary values are stored as INTEGER minor units (cents). Never floats.
+//    Use src/lib/money.ts for parse/format/arithmetic.
+//  * Costing is moving weighted-average. `Item.avgCost` is system-maintained and
+//    recomputed on every stock receipt. When stock is sold, the *current* avg
+//    cost is snapshotted onto the SaleLine (`unitCostSnapshot`) so realized
+//    profit is locked in and never changes retroactively.
+//  * Provider is SQLite for easy single-file backup. The schema avoids
+//    SQLite-only features so swapping `provider`/`url` to Postgres is trivial.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Inventory
+// ---------------------------------------------------------------------------
+
+model Item {
+  id               String   @id @default(cuid())
+  name             String
+  sku              String   @unique
+  category         String?
+  unit             String   @default("each") // each | kg | m | L | ...
+  quantity         Float    @default(0) // on-hand; Float to support kg/m/L fractional units
+  avgCost          Int      @default(0) // system-maintained moving-average unit cost, in cents
+  salePrice        Int      @default(0) // current sale price, in cents
+  reorderThreshold Float    @default(0)
+  supplierId       String?
+  notes            String?
+  primaryMediaId   String?  @unique
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  supplier       Contact?        @relation("ItemSupplier", fields: [supplierId], references: [id], onDelete: SetNull)
+  primaryMedia   Media?          @relation("ItemPrimaryMedia", fields: [primaryMediaId], references: [id], onDelete: SetNull)
+  media          Media[]         @relation("ItemMedia")
+  saleLines      SaleLine[]
+  purchaseLines  PurchaseLine[]
+  stockMovements StockMovement[]
+  priceLogs      PriceLog[]
+  documents      Document[]
+
+  @@index([category])
+  @@index([supplierId])
+}
+
+// ---------------------------------------------------------------------------
+// Contacts (customers / suppliers)
+// ---------------------------------------------------------------------------
+
+model Contact {
+  id        String      @id @default(cuid())
+  name      String
+  type      ContactType @default(customer)
+  email     String?
+  phone     String?
+  address   String?
+  notes     String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  sales         Sale[]
+  purchases     Purchase[]
+  suppliedItems Item[]     @relation("ItemSupplier")
+  documents     Document[]
+
+  @@index([type])
+}
+
+enum ContactType {
+  customer
+  supplier
+  both
+}
+
+// ---------------------------------------------------------------------------
+// Sales (drives realized profit)
+// ---------------------------------------------------------------------------
+
+model Sale {
+  id            String      @id @default(cuid())
+  contactId     String?
+  date          DateTime    @default(now())
+  status        PaymentStatus @default(paid)
+  paymentMethod String?     @default("cash")
+  notes         String?
+  // Rolled-up totals, all in cents. Stored so reports don't have to recompute.
+  revenue       Int         @default(0)
+  cogs          Int         @default(0)
+  grossProfit   Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  contact        Contact?        @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  lines          SaleLine[]
+  stockMovements StockMovement[]
+  documents      Document[]
+
+  @@index([date])
+  @@index([status])
+  @@index([contactId])
+}
+
+model SaleLine {
+  id               String @id @default(cuid())
+  saleId           String
+  itemId           String
+  qty              Float
+  unitSalePrice    Int // cents
+  unitCostSnapshot Int // cents — moving-avg cost AT THE TIME OF SALE (locks in profit)
+  lineRevenue      Int // qty * unitSalePrice
+  lineCogs         Int // qty * unitCostSnapshot
+  lineProfit       Int // lineRevenue - lineCogs
+
+  sale Sale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  item Item @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@index([saleId])
+  @@index([itemId])
+}
+
+// ---------------------------------------------------------------------------
+// Purchases / stock receipts
+// ---------------------------------------------------------------------------
+
+model Purchase {
+  id        String        @id @default(cuid())
+  contactId String?
+  date      DateTime      @default(now())
+  status    PaymentStatus @default(paid)
+  notes     String?
+  total     Int           @default(0) // cents
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  contact        Contact?        @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  lines          PurchaseLine[]
+  stockMovements StockMovement[]
+  documents      Document[]
+
+  @@index([date])
+  @@index([status])
+  @@index([contactId])
+}
+
+model PurchaseLine {
+  id         String @id @default(cuid())
+  purchaseId String
+  itemId     String
+  qty        Float
+  unitCost   Int // cents
+  lineTotal  Int // qty * unitCost
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  item     Item     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@index([purchaseId])
+  @@index([itemId])
+}
+
+enum PaymentStatus {
+  paid
+  unpaid
+}
+
+// ---------------------------------------------------------------------------
+// Expenses & other income (non-inventory cashflow)
+// ---------------------------------------------------------------------------
+
+model Expense {
+  id        String        @id @default(cuid())
+  date      DateTime      @default(now())
+  category  String // rent | wages | utilities | fees | ...
+  amount    Int // cents — positive number
+  kind      CashflowKind  @default(expense) // expense reduces net profit; income adds (non-sale)
+  note      String?
+  status    PaymentStatus @default(paid)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([date])
+  @@index([category])
+  @@index([kind])
+}
+
+enum CashflowKind {
+  expense
+  income
+}
+
+// ---------------------------------------------------------------------------
+// Stock movements & price logs (audit trails)
+// ---------------------------------------------------------------------------
+
+model StockMovement {
+  id         String   @id @default(cuid())
+  itemId     String
+  change     Float // +receipt / -sale / +/- manual adjustment
+  reason     String // purchase | sale | adjustment | seed
+  date       DateTime @default(now())
+  note       String?
+  saleId     String?
+  purchaseId String?
+
+  item     Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  sale     Sale?     @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  purchase Purchase? @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+
+  @@index([itemId])
+  @@index([date])
+}
+
+model PriceLog {
+  id        String        @id @default(cuid())
+  itemId    String
+  field     PriceField // cost | sale
+  oldPrice  Int // cents
+  newPrice  Int // cents
+  changedAt DateTime      @default(now())
+  note      String?
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId])
+}
+
+enum PriceField {
+  cost
+  sale
+}
+
+// ---------------------------------------------------------------------------
+// Media gallery
+// ---------------------------------------------------------------------------
+
+model Media {
+  id            String    @id @default(cuid())
+  itemId        String?
+  type          MediaType // image | video
+  filePath      String // path within storage root (relative key)
+  thumbnailPath String? // optimized thumbnail / video poster
+  webPath       String? // web-optimized image variant
+  caption       String?
+  alt           String?
+  mimeType      String
+  fileSize      Int // bytes
+  width         Int?
+  height        Int?
+  duration      Float? // seconds, for video
+  sortOrder     Int       @default(0)
+  createdAt     DateTime  @default(now())
+
+  item        Item?        @relation("ItemMedia", fields: [itemId], references: [id], onDelete: Cascade)
+  primaryOf   Item?        @relation("ItemPrimaryMedia")
+  socialPosts SocialPost[]
+
+  @@index([itemId])
+}
+
+enum MediaType {
+  image
+  video
+}
+
+// ---------------------------------------------------------------------------
+// Social publishing (optional, gated by configuration)
+// ---------------------------------------------------------------------------
+
+model SocialConnection {
+  id          String   @id @default(cuid())
+  provider    String // facebook | instagram
+  pageId      String?
+  pageName    String?
+  igUserId    String?
+  igUsername  String?
+  accessToken String? // long-lived page token
+  tokenExpiry DateTime?
+  status      String   @default("disconnected") // connected | disconnected | error
+  connectedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([provider])
+}
+
+model SocialPost {
+  id         String   @id @default(cuid())
+  mediaId    String?
+  provider   String // facebook | instagram
+  target     String // page id / ig user id
+  caption    String?
+  status     String   @default("pending") // pending | published | failed
+  externalId String?
+  permalink  String?
+  error      String?
+  createdAt  DateTime @default(now())
+
+  media Media? @relation(fields: [mediaId], references: [id], onDelete: SetNull)
+
+  @@index([mediaId])
+  @@index([provider])
+}
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+model Document {
+  id         String       @id @default(cuid())
+  title      String
+  type       DocumentType @default(other)
+  filePath   String
+  mimeType   String?
+  fileSize   Int?
+  notes      String?
+  contactId  String?
+  saleId     String?
+  purchaseId String?
+  itemId     String?
+  uploadedAt DateTime     @default(now())
+
+  contact  Contact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  sale     Sale?     @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  purchase Purchase? @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  item     Item?     @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  @@index([type])
+}
+
+enum DocumentType {
+  invoice
+  receipt
+  contract
+  other
+}
