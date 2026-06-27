@@ -35,6 +35,7 @@ model Item {
   reorderThreshold Float    @default(0)
   supplierId       String?
   notes            String?
+  source           String   @default("manual") // manual | shopify | etsy
   primaryMediaId   String?  @unique
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -64,6 +65,7 @@ model Contact {
   phone     String?
   address   String?
   notes     String?
+  source    String      @default("manual") // manual | shopify | etsy
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
 
@@ -92,6 +94,7 @@ model Sale {
   status        PaymentStatus @default(paid)
   paymentMethod String?     @default("cash")
   notes         String?
+  source        String      @default("manual") // manual | shopify | etsy
   // Rolled-up totals, all in cents. Stored so reports don't have to recompute.
   revenue       Int         @default(0)
   cogs          Int         @default(0)
@@ -339,4 +342,58 @@ enum DocumentType {
   receipt
   contract
   other
+}
+
+// ---------------------------------------------------------------------------
+// Platform integrations (Shopify / Etsy) — optional, gated by configuration
+// ---------------------------------------------------------------------------
+
+model IntegrationConnection {
+  id             String    @id @default(cuid())
+  provider       String // shopify | etsy
+  status         String    @default("disconnected") // connected | disconnected | error
+  shopDomain     String? // myshop.myshopify.com (Shopify)
+  shopName       String?
+  externalShopId String? // shop id / user id on the platform
+  accessToken    String?
+  refreshToken   String?
+  tokenExpiry    DateTime?
+  scopes         String?
+  twoWay         Boolean   @default(false) // allow pushing changes OUT to the platform
+  locationId     String? // Shopify inventory location for stock pushes
+  lastSyncedAt   DateTime?
+  connectedAt    DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([provider])
+}
+
+/// Maps a local entity to its id on an external platform (dedupe + push targets).
+model ExternalLink {
+  id           String   @id @default(cuid())
+  provider     String // shopify | etsy
+  entityType   String // item | sale | contact
+  entityId     String // local id
+  externalId   String // id on the platform
+  externalUrl  String?
+  lastSyncedAt DateTime @default(now())
+
+  @@unique([provider, entityType, externalId])
+  @@index([entityType, entityId])
+}
+
+model SyncLog {
+  id         String   @id @default(cuid())
+  provider   String
+  direction  String // import | export
+  entityType String // item | sale | contact | inventory
+  action     String // created | updated | skipped | pushed | error
+  status     String // ok | error
+  message    String?
+  externalId String?
+  entityId   String?
+  createdAt  DateTime @default(now())
+
+  @@index([provider])
+  @@index([createdAt])
 }

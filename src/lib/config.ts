@@ -21,6 +21,30 @@ export const config = {
     maxVideoBytes: (Number(process.env.MAX_VIDEO_SIZE_MB) || 200) * 1024 * 1024,
     maxVideoDurationSeconds: Number(process.env.MAX_VIDEO_DURATION_SECONDS) || 60,
   },
+  integrations: {
+    // Shopify: custom apps connect with just a shop domain + Admin API token
+    // (no app-level secret needed). App key/secret are only needed for the
+    // public-app OAuth flow.
+    shopify: {
+      apiVersion: process.env.SHOPIFY_API_VERSION ?? "2026-01",
+      apiKey: process.env.SHOPIFY_API_KEY ?? "",
+      apiSecret: process.env.SHOPIFY_API_SECRET ?? "",
+      redirectUri: process.env.SHOPIFY_OAUTH_REDIRECT_URI ?? "",
+      get oauthConfigured() {
+        return Boolean(process.env.SHOPIFY_API_KEY && process.env.SHOPIFY_API_SECRET);
+      },
+    },
+    // Etsy Open API v3: needs an app keystring (x-api-key). Listing/receipt
+    // access uses OAuth2 (PKCE). Etsy production access requires app review.
+    etsy: {
+      keystring: process.env.ETSY_KEYSTRING ?? "",
+      sharedSecret: process.env.ETSY_SHARED_SECRET ?? "",
+      redirectUri: process.env.ETSY_OAUTH_REDIRECT_URI ?? "",
+      get configured() {
+        return Boolean(process.env.ETSY_KEYSTRING);
+      },
+    },
+  },
   meta: {
     appId: process.env.META_APP_ID ?? "",
     appSecret: process.env.META_APP_SECRET ?? "",

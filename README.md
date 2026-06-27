@@ -206,6 +206,36 @@ Content Publishing API** (pin the version via `META_GRAPH_VERSION`, default `v21
 
 ---
 
+## Connecting Shopify & Etsy (platform sync)
+
+**Drawer → Shopify / Etsy** (`/integrations`). Optional and gated — the app runs
+fully without it. It imports **orders → Sales**, **products → Items/Products**, and
+**buyers → Contacts**, deduped via an `ExternalLink` table (provider + external id) so
+nothing double-counts, and every action is written to a **sync log**. Sales are tagged
+with a `source` (`manual` / `shopify` / `etsy`) to power the **Sales-by-channel** comparison.
+Two-way sync (push products + inventory *out*) is gated behind a per-platform toggle.
+
+### Shopify (works immediately with a custom app)
+1. Shopify admin → **Settings → Apps and sales channels → Develop apps → Create an app**.
+2. Give it Admin API scopes: `read_products, write_products, read_orders, read_customers,
+   read_inventory, write_inventory`. Install it and copy the **Admin API access token** (`shpat_…`).
+3. In ReFx: **Integrations → Shopify**, enter your `your-shop.myshopify.com` domain + the token → **Connect**, then **Sync now**.
+4. Toggle **Two-way sync** on to push products/inventory back to Shopify (uses the Admin REST API, version `SHOPIFY_API_VERSION`, default `2026-01`).
+
+### Etsy (needs an app keystring; production needs review)
+1. Create an app at <https://www.etsy.com/developers/your-apps> and copy the **keystring** (the `x-api-key`). Put it in `.env` as `ETSY_KEYSTRING` (this *enables* Etsy in the app).
+2. Etsy reads/writes use **OAuth 2.0 (PKCE)** with scopes like `transactions_r`, `listings_r`, `listings_w`. Obtain an access token + your **shop id**, then **Integrations → Etsy → Connect**.
+3. **App Review:** Etsy production access requires Etsy's app-review; dev/personal access works immediately for your own shop.
+
+### Notes / caveats
+- **Live testing needs real store credentials.** The import/dedupe **mapping logic is unit-tested** with mock payloads, but end-to-end runs require your Shopify/Etsy keys.
+- **Imported items start with unknown cost (avg cost 0)** — record a purchase or set the average cost so imported orders show accurate profit (revenue is correct immediately).
+- Imported orders **do not decrement local stock** (the platform already fulfilled them); inventory is reconciled via two-way sync instead.
+- API endpoints are pinned to current versions (Shopify `2026-01`; Etsy Open API v3) — verify against the platforms' docs at build time, as they version their APIs.
+- The in-app **OAuth helper flow** (so you don't paste tokens manually) and TikTok Shop / Amazon Handmade are the next steps on the integration roadmap.
+
+---
+
 ## Backup & restore
 
 Your data is two things: the **SQLite file** (`prisma/dev.db`) and the **`/uploads`**

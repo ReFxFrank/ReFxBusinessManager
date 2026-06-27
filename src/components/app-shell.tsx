@@ -22,6 +22,7 @@ import {
   FileText,
   Share2,
   Banknote,
+  Plug,
   LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -46,6 +47,7 @@ const DRAWER_LINKS = [
   { href: "/finances", label: "Finances", icon: Banknote },
   { href: "/reports", label: "Profit & Reports", icon: TrendingUp },
   { href: "/socials", label: "Socials", icon: AtSign },
+  { href: "/integrations", label: "Shopify / Etsy", icon: Plug },
   { href: "/gallery", label: "Gallery", icon: Images },
   { href: "/contacts", label: "Contacts", icon: Users },
   { href: "/documents", label: "Documents", icon: FileText },
