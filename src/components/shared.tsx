@@ -97,6 +97,33 @@ export function MarginBadge({ margin }: { margin: number | null }) {
   return <Badge variant={variant}>{formatPct(margin)}</Badge>;
 }
 
+/** Stock status from quantity vs reorder threshold. */
+export function stockStatus(quantity: number, reorderThreshold: number): "out" | "low" | "in" {
+  if (quantity <= 0) return "out";
+  if (quantity <= reorderThreshold) return "low";
+  return "in";
+}
+
+export function StockPill({
+  quantity,
+  reorderThreshold,
+  unit,
+}: {
+  quantity: number;
+  reorderThreshold: number;
+  unit: string;
+}) {
+  const status = stockStatus(quantity, reorderThreshold);
+  const cls =
+    status === "out"
+      ? "text-destructive"
+      : status === "low"
+        ? "text-warning"
+        : "text-muted-foreground";
+  const label = status === "out" ? "Out of stock" : `${quantity} ${unit} in stock`;
+  return <span className={cn("text-xs font-medium", cls)}>{label}</span>;
+}
+
 export function StatusBadge({ status }: { status: string }) {
   const map: Record<string, "success" | "warning" | "secondary"> = {
     paid: "success",

@@ -4,6 +4,12 @@
  */
 
 export const config = {
+  app: {
+    name: process.env.APP_NAME ?? "ReFx Business Manager",
+    shortName: process.env.APP_SHORT_NAME ?? "ReFx",
+    // Shown in the dashboard greeting ("Good morning, <ownerName> 👋").
+    ownerName: process.env.OWNER_NAME ?? "Alex",
+  },
   auth: {
     enabled: process.env.AUTH_ENABLED !== "false",
     password: process.env.AUTH_PASSWORD ?? "demo1234",

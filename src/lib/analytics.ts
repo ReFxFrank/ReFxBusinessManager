@@ -151,6 +151,187 @@ export async function trendSeries(period: Period) {
   return Array.from(buckets.values());
 }
 
+// ---------------------------------------------------------------------------
+// Mobile dashboard: period selector with month-over-month deltas + activity
+// ---------------------------------------------------------------------------
+
+export type DashboardRangeKey = "month" | "30d" | "year";
+
+export interface RangeWindow {
+  from: Date;
+  to: Date;
+  prevFrom: Date;
+  prevTo: Date;
+  label: string;
+}
+
+/** Resolve the selected range plus the comparable previous range. */
+export function periodRange(key: DashboardRangeKey): RangeWindow {
+  const now = new Date();
+  if (key === "30d") {
+    const to = now;
+    const from = new Date(now.getTime() - 30 * 864e5);
+    return { from, to, prevFrom: new Date(from.getTime() - 30 * 864e5), prevTo: from, label: "Last 30 Days" };
+  }
+  if (key === "year") {
+    const from = new Date(now.getFullYear(), 0, 1);
+    return {
+      from,
+      to: now,
+      prevFrom: new Date(now.getFullYear() - 1, 0, 1),
+      prevTo: new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()),
+      label: "This Year",
+    };
+  }
+  // calendar month vs previous calendar month
+  const from = new Date(now.getFullYear(), now.getMonth(), 1);
+  return {
+    from,
+    to: now,
+    prevFrom: new Date(now.getFullYear(), now.getMonth() - 1, 1),
+    prevTo: new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()),
+    label: "This Month",
+  };
+}
+
+/** Percentage change current vs previous; null when previous is 0 (no base). */
+function deltaPct(current: number, previous: number): number | null {
+  if (previous === 0) return current === 0 ? 0 : null;
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+export interface DashboardMetric {
+  value: number; // cents
+  deltaPct: number | null; // vs previous comparable period
+}
+
+export async function dashboardSummary(key: DashboardRangeKey) {
+  const r = periodRange(key);
+  const [cur, prev, owed] = await Promise.all([
+    businessSummary({ from: r.from, to: r.to }),
+    businessSummary({ from: r.prevFrom, to: r.prevTo }),
+    outstanding(),
+  ]);
+
+  // "Total Expenses" here = COGS + operating expenses (all money out), so the
+  // card trio reads cleanly: Revenue − Total Expenses ≈ Net Profit.
+  const curExpenses = cur.cogs + cur.operatingExpenses;
+  const prevExpenses = prev.cogs + prev.operatingExpenses;
+
+  const revenue: DashboardMetric = { value: cur.revenue, deltaPct: deltaPct(cur.revenue, prev.revenue) };
+  const expenses: DashboardMetric = { value: curExpenses, deltaPct: deltaPct(curExpenses, prevExpenses) };
+  const netProfit: DashboardMetric = { value: cur.netProfit, deltaPct: deltaPct(cur.netProfit, prev.netProfit) };
+
+  return {
+    label: r.label,
+    revenue,
+    expenses,
+    netProfit,
+    grossMargin: cur.grossMargin,
+    netMargin: cur.netMargin,
+    outstandingInvoices: { count: owed.receivableCount, total: owed.receivables },
+  };
+}
+
+/** KPI tiles for the Dashboard screen (orders, customers, AOV, units). */
+export async function dashboardKpis(key: DashboardRangeKey) {
+  const r = periodRange(key);
+
+  async function windowStats(from: Date, to: Date) {
+    const [sales, newCustomers, unitAgg] = await Promise.all([
+      prisma.sale.findMany({ where: { date: { gte: from, lte: to } }, select: { revenue: true } }),
+      prisma.contact.count({ where: { type: { in: ["customer", "both"] }, createdAt: { gte: from, lte: to } } }),
+      prisma.saleLine.aggregate({ where: { sale: { date: { gte: from, lte: to } } }, _sum: { qty: true } }),
+    ]);
+    const orders = sales.length;
+    const revenue = sales.reduce((s, x) => s + x.revenue, 0);
+    const units = unitAgg._sum.qty ?? 0;
+    const aov = orders > 0 ? Math.round(revenue / orders) : 0;
+    return { orders, newCustomers, units, aov, revenue };
+  }
+
+  const [cur, prev] = await Promise.all([
+    windowStats(r.from, r.to),
+    windowStats(r.prevFrom, r.prevTo),
+  ]);
+
+  return {
+    label: r.label,
+    revenue: { value: cur.revenue, deltaPct: deltaPct(cur.revenue, prev.revenue) },
+    orders: { value: cur.orders, deltaPct: deltaPct(cur.orders, prev.orders) },
+    newCustomers: { value: cur.newCustomers, deltaPct: deltaPct(cur.newCustomers, prev.newCustomers) },
+    avgOrderValue: { value: cur.aov, deltaPct: deltaPct(cur.aov, prev.aov) },
+    unitsSold: { value: cur.units, deltaPct: deltaPct(cur.units, prev.units) },
+  };
+}
+
+/** Daily revenue series for the selected range (compact chart). */
+export async function rangeSalesSeries(key: DashboardRangeKey) {
+  const r = periodRange(key);
+  return trendSeries({ from: r.from, to: r.to });
+}
+
+export type ActivityKind = "payment" | "invoice" | "purchase" | "expense" | "income";
+
+export interface ActivityEntry {
+  id: string;
+  kind: ActivityKind;
+  title: string;
+  subtitle: string;
+  amount: number; // signed cents (+in / -out)
+  date: Date;
+  href: string;
+}
+
+/** Unified, most-recent-first feed across sales, purchases and expenses. */
+export async function recentActivity(limit = 8): Promise<ActivityEntry[]> {
+  const [sales, purchases, expenses] = await Promise.all([
+    prisma.sale.findMany({ orderBy: { date: "desc" }, take: limit, include: { contact: true } }),
+    prisma.purchase.findMany({ orderBy: { date: "desc" }, take: limit, include: { contact: true } }),
+    prisma.expense.findMany({ orderBy: { date: "desc" }, take: limit }),
+  ]);
+
+  const entries: ActivityEntry[] = [];
+
+  for (const s of sales) {
+    const paid = s.status === "paid";
+    entries.push({
+      id: `sale-${s.id}`,
+      kind: paid ? "payment" : "invoice",
+      title: paid ? "Payment received" : "Invoice sent",
+      subtitle: `${s.contact?.name ?? "Walk-in"} · #${s.id.slice(-6).toUpperCase()}`,
+      amount: s.revenue,
+      date: s.date,
+      href: `/sales/${s.id}`,
+    });
+  }
+  for (const p of purchases) {
+    entries.push({
+      id: `pur-${p.id}`,
+      kind: "purchase",
+      title: "Stock purchased",
+      subtitle: `${p.contact?.name ?? "Supplier"} · #${p.id.slice(-6).toUpperCase()}`,
+      amount: -p.total,
+      date: p.date,
+      href: `/purchases/${p.id}`,
+    });
+  }
+  for (const e of expenses) {
+    const income = e.kind === "income";
+    entries.push({
+      id: `exp-${e.id}`,
+      kind: income ? "income" : "expense",
+      title: income ? "Income added" : "Expense added",
+      subtitle: e.note ? `${e.category} · ${e.note}` : e.category,
+      amount: income ? e.amount : -e.amount,
+      date: e.date,
+      href: "/expenses",
+    });
+  }
+
+  return entries.sort((a, b) => b.date.getTime() - a.date.getTime()).slice(0, limit);
+}
+
 export async function outstanding() {
   const unpaidSales = await prisma.sale.findMany({
     where: { status: "unpaid" },

@@ -63,6 +63,35 @@ export function RevenueProfitChart({ data }: { data: TrendPoint[] }) {
   );
 }
 
+/** Compact single-series area chart for the Dashboard/Finances overview cards. */
+export function SparkAreaChart({
+  data,
+  dataKey = "value",
+  color = "hsl(var(--primary))",
+  height = 150,
+}: {
+  data: Record<string, number | string>[];
+  dataKey?: string;
+  color?: string;
+  height?: number;
+}) {
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <AreaChart data={data} margin={{ top: 6, right: 4, left: 4, bottom: 0 }}>
+        <defs>
+          <linearGradient id={`spark-${dataKey}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor={color} stopOpacity={0.28} />
+            <stop offset="95%" stopColor={color} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <XAxis dataKey="date" tickFormatter={fmtDate} tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" minTickGap={28} axisLine={false} tickLine={false} />
+        <Tooltip content={<TooltipBox />} />
+        <Area type="monotone" dataKey={dataKey} name="Revenue" stroke={color} strokeWidth={2.2} fill={`url(#spark-${dataKey})`} />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
 export function MarginTrendChart({ data }: { data: { date: string; margin: number }[] }) {
   return (
     <ResponsiveContainer width="100%" height={240}>

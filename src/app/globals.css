@@ -4,56 +4,56 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
+    --background: 80 14% 97%;
+    --foreground: 150 18% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card-foreground: 150 18% 12%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
-    --primary: 221 83% 53%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --accent: 210 40% 96%;
-    --accent-foreground: 222 47% 11%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 210 40% 98%;
-    --success: 142 71% 45%;
-    --success-foreground: 210 40% 98%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 222 47% 11%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 221 83% 53%;
-    --radius: 0.5rem;
+    --popover-foreground: 150 18% 12%;
+    --primary: 142 40% 34%;
+    --primary-foreground: 90 30% 98%;
+    --secondary: 120 17% 94%;
+    --secondary-foreground: 150 18% 16%;
+    --muted: 120 14% 94%;
+    --muted-foreground: 150 8% 42%;
+    --accent: 138 32% 92%;
+    --accent-foreground: 142 40% 24%;
+    --destructive: 4 72% 50%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 142 52% 38%;
+    --success-foreground: 0 0% 98%;
+    --warning: 32 90% 48%;
+    --warning-foreground: 30 40% 12%;
+    --border: 130 14% 89%;
+    --input: 130 14% 89%;
+    --ring: 142 40% 34%;
+    --radius: 0.9rem;
   }
 
   .dark {
-    --background: 222 47% 11%;
-    --foreground: 210 40% 98%;
-    --card: 222 47% 13%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222 47% 13%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 217 91% 60%;
-    --primary-foreground: 222 47% 11%;
-    --secondary: 217 33% 18%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217 33% 18%;
-    --muted-foreground: 215 20% 65%;
-    --accent: 217 33% 18%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 63% 41%;
-    --destructive-foreground: 210 40% 98%;
-    --success: 142 71% 45%;
-    --success-foreground: 210 40% 98%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 222 47% 11%;
-    --border: 217 33% 22%;
-    --input: 217 33% 22%;
-    --ring: 217 91% 60%;
+    --background: 150 16% 8%;
+    --foreground: 90 20% 96%;
+    --card: 150 14% 11%;
+    --card-foreground: 90 20% 96%;
+    --popover: 150 14% 11%;
+    --popover-foreground: 90 20% 96%;
+    --primary: 142 48% 46%;
+    --primary-foreground: 150 30% 6%;
+    --secondary: 150 12% 18%;
+    --secondary-foreground: 90 20% 96%;
+    --muted: 150 12% 18%;
+    --muted-foreground: 140 10% 62%;
+    --accent: 150 16% 20%;
+    --accent-foreground: 90 20% 96%;
+    --destructive: 4 62% 46%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 142 52% 44%;
+    --success-foreground: 0 0% 98%;
+    --warning: 32 90% 52%;
+    --warning-foreground: 30 40% 10%;
+    --border: 150 12% 22%;
+    --input: 150 12% 22%;
+    --ring: 142 48% 46%;
   }
 }
 
@@ -75,4 +75,47 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 input[type="number"] {
   -moz-appearance: textfield;
+}
+
+/* ---- Native-app feel ---------------------------------------------------- */
+@layer utilities {
+  /* iOS safe-area helpers (used by the header & bottom tab bar) */
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .h-safe-bottom {
+    height: env(safe-area-inset-bottom);
+  }
+  /* room so content never hides behind the fixed bottom tab bar */
+  .pb-tabbar {
+    padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+  }
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  /* feel less "webpage", more "app" */
+  overscroll-behavior-y: none;
+}
+
+/* Hide scrollbars on horizontal shortcut rails while staying scrollable */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Don't print the app chrome */
+@media print {
+  .app-chrome {
+    display: none !important;
+  }
 }

@@ -41,6 +41,26 @@ Open **http://localhost:3000**.
 
 ---
 
+## Install it like an iOS app (PWA)
+
+The app is a **mobile-first installable PWA** with a native-style shell — a top bar,
+a 6-tab bottom bar (Home · Dashboard · Inventory · Products · Socials · Finances), and
+a green theme. To put it on your iPhone home screen (runs fullscreen, no Safari chrome):
+
+1. Deploy it to an **https** URL (see "How can I deploy this" in the project notes) and open it in **Safari**.
+2. Tap **Share → Add to Home Screen**.
+3. Launch it from the new icon — it opens standalone, like a native app.
+
+It ships a web app manifest (`/manifest.webmanifest`), iOS meta tags, app icons, and a
+conservative service worker (`/public/sw.js`) that gives an offline shell without caching
+business data. Set `OWNER_NAME` in `.env` to change the dashboard greeting ("Good
+morning, <name> 👋"). On desktop the same app renders centered at phone width.
+
+> A true App Store build (Capacitor wrapper or React Native) is possible later but needs a
+> Mac + Xcode; the PWA gives the native look/feel today with no build toolchain.
+
+---
+
 ## The core loop (the point of the app)
 
 1. **Buy stock** (Purchases) → increases quantity on hand, **recomputes the item's
