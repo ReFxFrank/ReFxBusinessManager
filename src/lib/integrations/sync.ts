@@ -13,7 +13,8 @@
 
 import { prisma } from "../prisma";
 import { autoSku } from "../utils";
-import { computeLine } from "../money";
+import { computeLine, formatMoney } from "../money";
+import type { Prisma } from "@prisma/client";
 import { ShopifyClient } from "./shopify";
 import { EtsyClient } from "./etsy";
 import {
@@ -65,12 +66,37 @@ async function linkEntity(
   entityId: string,
   externalId: string,
   externalUrl?: string | null,
+  client: Prisma.TransactionClient | typeof prisma = prisma,
 ) {
-  await prisma.externalLink.upsert({
+  await client.externalLink.upsert({
     where: { provider_entityType_externalId: { provider, entityType, externalId } },
     update: { entityId, externalUrl: externalUrl ?? undefined, lastSyncedAt: new Date() },
     create: { provider, entityType, entityId, externalId, externalUrl: externalUrl ?? undefined },
   });
+}
+
+/**
+ * Create an Item, regenerating the SKU if the random auto-SKU happens to collide
+ * with the unique constraint (P2002). A caller-supplied SKU is assumed already
+ * checked for uniqueness, so we only retry the auto-generated path.
+ */
+async function createItemSafe(data: { name: string; sku: string | null; salePrice: number; quantity: number; category?: string | null; source: string }) {
+  let sku = data.sku || autoSku(data.name);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      return await prisma.item.create({ data: { ...data, sku } });
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      const target = (e as { meta?: { target?: string[] | string } }).meta?.target;
+      const isSkuConflict = code === "P2002" && (Array.isArray(target) ? target.includes("sku") : target === "sku");
+      if (isSkuConflict) {
+        sku = autoSku(data.name);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new IntegrationError("Could not generate a unique SKU after several attempts.");
 }
 
 // --- IMPORT ----------------------------------------------------------------
@@ -89,15 +115,13 @@ export async function upsertProduct(provider: string, np: NormalizedProduct) {
   // Link to an existing item by SKU if one matches, else create a new item.
   let item = np.sku ? await prisma.item.findUnique({ where: { sku: np.sku } }) : null;
   if (!item) {
-    item = await prisma.item.create({
-      data: {
-        name: np.title,
-        sku: np.sku || autoSku(np.title),
-        salePrice: np.price,
-        quantity: np.quantity,
-        category: np.category,
-        source: provider,
-      },
+    item = await createItemSafe({
+      name: np.title,
+      sku: np.sku,
+      salePrice: np.price,
+      quantity: np.quantity,
+      category: np.category,
+      source: provider,
     });
     await log(provider, "import", "item", "created", "ok", { externalId: np.externalId, entityId: item.id });
   } else {
@@ -130,48 +154,61 @@ export async function upsertOrder(provider: string, no: NormalizedOrder) {
   const contactId = no.customer ? await upsertCustomer(provider, no.customer) : null;
 
   // Resolve each line to a local item (by external link, then SKU, else create).
+  // Each line is isolated so one bad line can't abort the whole order.
   const lines: { itemId: string; qty: number; unitSalePrice: number; unitCostSnapshot: number; lineRevenue: number; lineCogs: number; lineProfit: number }[] = [];
   for (const l of no.lines) {
-    let itemId: string | null = null;
-    if (l.externalProductId) {
-      const link = await findLink(provider, "item", l.externalProductId);
-      if (link) itemId = link.entityId;
+    try {
+      let itemId: string | null = null;
+      if (l.externalProductId) {
+        const link = await findLink(provider, "item", l.externalProductId);
+        if (link) itemId = link.entityId;
+      }
+      if (!itemId && l.sku) {
+        const bySku = await prisma.item.findUnique({ where: { sku: l.sku } });
+        if (bySku) itemId = bySku.id;
+      }
+      if (!itemId) {
+        const created = await createItemSafe({ name: l.title, sku: l.sku, salePrice: l.unitPrice, quantity: 0, source: provider });
+        itemId = created.id;
+        if (l.externalProductId) await linkEntity(provider, "item", itemId, l.externalProductId);
+      }
+      const item = await prisma.item.findUniqueOrThrow({ where: { id: itemId } });
+      const { lineRevenue, lineCogs, lineProfit } = computeLine(l.qty, l.unitPrice, item.avgCost);
+      lines.push({ itemId, qty: l.qty, unitSalePrice: l.unitPrice, unitCostSnapshot: item.avgCost, lineRevenue, lineCogs, lineProfit });
+    } catch (e) {
+      await log(provider, "import", "sale", "error", "error", { externalId: no.externalId, message: `line "${l.title}": ${e instanceof Error ? e.message : e}` });
     }
-    if (!itemId && l.sku) {
-      const bySku = await prisma.item.findUnique({ where: { sku: l.sku } });
-      if (bySku) itemId = bySku.id;
-    }
-    if (!itemId) {
-      const created = await prisma.item.create({
-        data: { name: l.title, sku: l.sku || autoSku(l.title), salePrice: l.unitPrice, quantity: 0, source: provider },
-      });
-      itemId = created.id;
-      if (l.externalProductId) await linkEntity(provider, "item", itemId, l.externalProductId);
-    }
-    const item = await prisma.item.findUniqueOrThrow({ where: { id: itemId } });
-    const { lineRevenue, lineCogs, lineProfit } = computeLine(l.qty, l.unitPrice, item.avgCost);
-    lines.push({ itemId, qty: l.qty, unitSalePrice: l.unitPrice, unitCostSnapshot: item.avgCost, lineRevenue, lineCogs, lineProfit });
   }
+  if (lines.length === 0) throw new IntegrationError(`Order ${no.number} had no importable lines.`, provider);
 
+  // Revenue here is merchandise revenue (Σ line price), matching the COGS basis.
+  // The platform's grand total (incl. shipping/tax/discounts) is recorded in the
+  // note for transparency rather than silently dropped.
   const revenue = lines.reduce((s, x) => s + x.lineRevenue, 0);
   const cogs = lines.reduce((s, x) => s + x.lineCogs, 0);
   const grossProfit = revenue - cogs;
+  const totalNote = no.total && no.total !== revenue ? ` · platform total ${formatMoney(no.total)}` : "";
 
-  const sale = await prisma.sale.create({
-    data: {
-      contactId,
-      date: no.date,
-      status: no.paid ? "paid" : "unpaid",
-      paymentMethod: provider,
-      source: provider,
-      notes: `Imported from ${provider} order ${no.number}`,
-      revenue,
-      cogs,
-      grossProfit,
-      lines: { create: lines },
-    },
+  // Create the Sale AND its dedupe link atomically so a crash can't leave an
+  // unlinked Sale that would be re-imported (and double-counted) next run.
+  const sale = await prisma.$transaction(async (tx) => {
+    const created = await tx.sale.create({
+      data: {
+        contactId,
+        date: no.date,
+        status: no.paid ? "paid" : "unpaid",
+        paymentMethod: provider,
+        source: provider,
+        notes: `Imported from ${provider} order ${no.number}${totalNote}`,
+        revenue,
+        cogs,
+        grossProfit,
+        lines: { create: lines },
+      },
+    });
+    await linkEntity(provider, "sale", created.id, no.externalId, no.url, tx);
+    return created;
   });
-  await linkEntity(provider, "sale", sale.id, no.externalId, no.url);
   await log(provider, "import", "sale", "created", "ok", { externalId: no.externalId, entityId: sale.id });
   return sale.id;
 }

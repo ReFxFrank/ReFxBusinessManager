@@ -23,6 +23,7 @@ import {
 } from "./types";
 
 const BASE = "https://openapi.etsy.com/v3/application";
+const PAGE = 100;
 
 const priceToCents = (p?: { amount: number; divisor: number } | null) =>
   p && p.divisor ? Math.round((p.amount / p.divisor) * 100) : 0;
@@ -32,6 +33,9 @@ export class EtsyClient implements IntegrationProvider {
   constructor(private ctx: ConnectionContext) {
     if (!ctx.accessToken || !ctx.externalShopId) {
       throw new IntegrationError("Etsy is not connected (missing token or shop id).", "etsy");
+    }
+    if (!/^[0-9]+$/.test(ctx.externalShopId)) {
+      throw new IntegrationError("Invalid Etsy shop id (must be numeric).", "etsy");
     }
     if (!config.integrations.etsy.keystring) {
       throw new IntegrationError("ETSY_KEYSTRING is not set in the environment.", "etsy");
@@ -56,6 +60,23 @@ export class EtsyClient implements IntegrationProvider {
     return json as T;
   }
 
+  /** Page through an Etsy list endpoint via the offset param until exhausted. */
+  private async getAll<T>(buildPath: (offset: number) => string): Promise<T[]> {
+    const out: T[] = [];
+    let offset = 0;
+    let guard = 0;
+    // Etsy returns { count, results }. Stop when a short page comes back.
+    // eslint-disable-next-line no-constant-condition
+    while (guard++ < 200) {
+      const data = await this.req<{ count: number; results: T[] }>(buildPath(offset));
+      const results = data.results ?? [];
+      out.push(...results);
+      if (results.length < PAGE || out.length >= (data.count ?? out.length)) break;
+      offset += PAGE;
+    }
+    return out;
+  }
+
   private shopId() {
     return this.ctx.externalShopId!;
   }
@@ -66,13 +87,14 @@ export class EtsyClient implements IntegrationProvider {
   }
 
   async importProducts(): Promise<NormalizedProduct[]> {
-    const data = await this.req<{ results: EtsyListing[] }>(
-      `/shops/${this.shopId()}/listings/active?limit=100&includes=Images`,
+    const listings = await this.getAll<EtsyListing>(
+      (o) => `/shops/${this.shopId()}/listings/active?limit=${PAGE}&offset=${o}&includes=Images,Inventory`,
     );
-    return (data.results ?? []).map((l) => ({
+    return listings.map((l) => ({
       externalId: l.listing_id.toString(),
       title: l.title,
-      sku: l.skus?.[0] ?? null,
+      // SKUs live on inventory offerings, not the top-level listing.
+      sku: l.inventory?.products?.[0]?.sku ?? null,
       price: priceToCents(l.price),
       quantity: l.quantity ?? 0,
       category: l.taxonomy_id ? `Etsy ${l.taxonomy_id}` : null,
@@ -89,34 +111,32 @@ export class EtsyClient implements IntegrationProvider {
 
   async importOrders(sinceDays = 90): Promise<NormalizedOrder[]> {
     const minCreated = Math.floor((Date.now() - sinceDays * 864e5) / 1000);
-    const data = await this.req<{ results: EtsyReceipt[] }>(
-      `/shops/${this.shopId()}/receipts?limit=100&min_created=${minCreated}&includes=Transactions`,
+    const receipts = await this.getAll<EtsyReceipt>(
+      (o) => `/shops/${this.shopId()}/receipts?limit=${PAGE}&offset=${o}&min_created=${minCreated}&includes=Transactions`,
     );
-    return (data.results ?? []).map((r) => {
-      const name = [r.name, r.first_line].filter(Boolean).join(" ") || r.buyer_email || "Etsy buyer";
-      return {
-        externalId: r.receipt_id.toString(),
-        number: `#${r.receipt_id}`,
-        date: new Date((r.created_timestamp ?? 0) * 1000),
-        paid: Boolean(r.is_paid),
-        total: priceToCents(r.grandtotal),
-        customer: {
-          externalId: r.buyer_user_id ? r.buyer_user_id.toString() : `etsy-${r.receipt_id}`,
-          name,
-          email: r.buyer_email ?? null,
-          phone: null,
-        },
-        lines: (r.transactions ?? []).map((t) => ({
-          externalProductId: t.listing_id?.toString() ?? null,
-          sku: t.sku ?? null,
-          title: t.title,
-          qty: t.quantity,
-          unitPrice: priceToCents(t.price),
-        })),
-        url: `https://www.etsy.com/your/orders/sold/completed?order_id=${r.receipt_id}`,
-        raw: r,
-      };
-    });
+    return receipts.map((r) => ({
+      externalId: r.receipt_id.toString(),
+      number: `#${r.receipt_id}`,
+      date: new Date((r.created_timestamp ?? 0) * 1000),
+      paid: Boolean(r.is_paid),
+      total: priceToCents(r.grandtotal),
+      customer: {
+        externalId: r.buyer_user_id ? r.buyer_user_id.toString() : `etsy-${r.receipt_id}`,
+        // `name` is the buyer/recipient name; `first_line` is a street address — never use it as a name.
+        name: r.name || r.buyer_email || "Etsy buyer",
+        email: r.buyer_email ?? null,
+        phone: null,
+      },
+      lines: (r.transactions ?? []).map((t) => ({
+        externalProductId: t.listing_id?.toString() ?? null,
+        sku: t.sku ?? null,
+        title: t.title,
+        qty: t.quantity,
+        unitPrice: priceToCents(t.price),
+      })),
+      url: `https://www.etsy.com/your/orders/sold/completed?order_id=${r.receipt_id}`,
+      raw: r,
+    }));
   }
 
   async pushProduct(input: {
@@ -130,6 +150,8 @@ export class EtsyClient implements IntegrationProvider {
     // Etsy listing creation needs who_made / when_made / taxonomy_id and a
     // shipping_profile_id (for physical goods). We send sensible defaults; Etsy
     // returns a clear validation error if a shipping profile/taxonomy is required.
+    // NOTE: SKU is NOT accepted by createDraftListing — it is set afterwards via
+    // PUT /listings/{id}/inventory (see pushInventory), so we don't send it here.
     const body = {
       quantity: Math.max(1, Math.round(input.quantity)),
       title: input.title,
@@ -137,8 +159,7 @@ export class EtsyClient implements IntegrationProvider {
       price: Number((input.price / 100).toFixed(2)),
       who_made: "i_did",
       when_made: "made_to_order",
-      taxonomy_id: 1, // caller should override via Etsy; 1 is a placeholder
-      ...(input.sku ? { skus: [input.sku] } : {}),
+      taxonomy_id: 1, // placeholder — override with your shop's real taxonomy id
     };
     const res = await this.req<{ listing_id: number; url?: string }>(
       `/shops/${this.shopId()}/listings`,
@@ -148,12 +169,11 @@ export class EtsyClient implements IntegrationProvider {
   }
 
   async pushInventory(input: { externalId: string; sku: string | null; quantity: number }): Promise<void> {
-    // Minimal inventory update: set the quantity on the single default offering.
     const current = await this.req<{ products: EtsyInventoryProduct[] }>(
       `/listings/${input.externalId}/inventory`,
     );
     const products = (current.products ?? []).map((p) => ({
-      sku: p.sku ?? input.sku ?? "",
+      sku: input.sku ?? p.sku ?? "",
       property_values: p.property_values ?? [],
       offerings: (p.offerings ?? []).map((o) => ({
         price: o.price?.amount && o.price?.divisor ? o.price.amount / o.price.divisor : 0,
@@ -174,29 +194,29 @@ interface EtsyMoney {
   divisor: number;
   currency_code?: string;
 }
+interface EtsyInventoryProduct {
+  sku?: string;
+  property_values?: unknown[];
+  offerings?: { price?: EtsyMoney; quantity?: number }[];
+}
 interface EtsyListing {
   listing_id: number;
   title: string;
   quantity: number;
   price?: EtsyMoney;
-  skus?: string[];
   taxonomy_id?: number;
   url?: string;
   images?: { url_570xN: string }[];
+  inventory?: { products?: EtsyInventoryProduct[] };
 }
 interface EtsyReceipt {
   receipt_id: number;
-  name?: string;
-  first_line?: string;
+  name?: string; // buyer/recipient name
+  first_line?: string; // shipping address street — NOT a name
   buyer_email?: string;
   buyer_user_id?: number;
   created_timestamp?: number;
   is_paid?: boolean;
   grandtotal?: EtsyMoney;
   transactions?: { listing_id: number | null; sku: string | null; title: string; quantity: number; price?: EtsyMoney }[];
-}
-interface EtsyInventoryProduct {
-  sku?: string;
-  property_values?: unknown[];
-  offerings?: { price?: EtsyMoney; quantity?: number }[];
 }
